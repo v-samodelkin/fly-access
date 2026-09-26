@@ -38,6 +38,10 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var apps: [FlyApp] = []
     private var lastAppsAttempt = Date.distantPast
     private var hasAppList = false
+    private var lastAppsSuccess: Date?
+    private var appsRefreshError: String?
+    private var partialAppList = false
+    private let appsFreshnessItem = NSMenuItem(title: "Not updated yet", action: nil, keyEquivalent: "")
     private let python = Bundle.main.object(forInfoDictionaryKey: "PythonPath") as! String
     private let fly = Bundle.main.object(forInfoDictionaryKey: "FlyPath") as! String
     private let directory = Bundle.main.object(forInfoDictionaryKey: "ProfileDirectory") as! String
@@ -63,9 +67,10 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add("Refresh", #selector(refreshAll))
         add("Help", #selector(help))
         add("Quit", #selector(quit)).toolTip = "The VPN stays connected."
-        renderApps(error: nil)
+        renderApps()
         item.menu = menu
-        for (seconds, selector) in [(15.0, #selector(refresh)), (60.0, #selector(loadApps))] {
+        for (seconds, selector) in [(15.0, #selector(refresh)), (60.0, #selector(loadApps)),
+                                    (1.0, #selector(updateAppsFreshness))] {
             let timer = Timer(timeInterval: seconds, target: self, selector: selector,
                               userInfo: nil, repeats: true)
             RunLoop.main.add(timer, forMode: .common)
@@ -82,6 +87,7 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuWillOpen(_ openedMenu: NSMenu) {
+        updateAppsFreshness()
         if openedMenu === menu { refresh() }
         if Date().timeIntervalSince(lastAppsAttempt) >= 60 { loadApps() }
     }
@@ -92,6 +98,7 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !refreshingApps else { return }
         refreshingApps = true
         lastAppsAttempt = Date()
+        updateAppsFreshness()
         DispatchQueue.global(qos: .utility).async {
             let result = self.run(self.python, ["-B", self.resource("fly_apps.py"), "--fly", self.fly])
             let payload = try? JSONDecoder().decode(FlyAppsResult.self, from: result.1)
@@ -100,38 +107,70 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let payload = payload, payload.ok, result.0 == 0 {
                     self.apps = payload.apps
                     self.hasAppList = true
-                    self.renderApps(error: payload.partial > 0 ? "Some app details are unavailable" : nil)
+                    self.lastAppsSuccess = Date()
+                    self.partialAppList = payload.partial > 0
+                    self.appsRefreshError = nil
                 } else {
-                    self.renderApps(error: payload?.error ?? "Unable to refresh apps", stale: self.hasAppList)
+                    self.appsRefreshError = payload?.error ?? "Unable to refresh apps"
                 }
+                self.renderApps()
             }
         }
     }
 
-    private func renderApps(error: String?, stale: Bool = false) {
+    private func renderApps() {
         appsItem.title = apps.isEmpty ? "Apps" : "Apps (\(apps.count))"
         appsMenu.removeAllItems()
-        if let error = error {
-            let row = NSMenuItem(title: stale ? "Offline - saved list" : hasAppList ? "Some details unavailable" : "Apps unavailable",
-                                action: nil, keyEquivalent: "")
-            row.toolTip = error
-            row.isEnabled = false
-            appsMenu.addItem(row)
-        }
-        if apps.isEmpty && error == nil {
-            let row = NSMenuItem(title: hasAppList ? "No apps yet" : "Loading...", action: nil, keyEquivalent: "")
+        if apps.isEmpty && hasAppList {
+            let row = NSMenuItem(title: "No apps yet", action: nil, keyEquivalent: "")
             row.isEnabled = false
             appsMenu.addItem(row)
         }
         for app in apps {
-            let row = NSMenuItem(title: app.name, action: #selector(openApp(_:)), keyEquivalent: "")
+            let row = NSMenuItem(title: "\(app.name) — \(app.statusLabel)",
+                                 action: #selector(openApp(_:)), keyEquivalent: "")
             row.target = self
             row.representedObject = app.url
-            row.toolTip = "\(app.statusLabel) · \(app.organization)\n\(app.detail)\n\(app.url)"
-            let symbol = app.status == "sleeping" ? "moon" : app.status == "started" ? "circle.fill" : "circle.dotted"
-            row.image = NSImage(systemSymbolName: symbol, accessibilityDescription: app.statusLabel)
+            row.toolTip = "\(app.organization)\n\(app.detail)\n\(app.url)"
             appsMenu.addItem(row)
         }
+        if appsMenu.numberOfItems > 0 { appsMenu.addItem(.separator()) }
+        appsFreshnessItem.isEnabled = false
+        appsMenu.addItem(appsFreshnessItem)
+        updateAppsFreshness()
+    }
+
+    // This timer changes text only. Fly requests still run once a minute.
+    @objc private func updateAppsFreshness() {
+        guard let updated = lastAppsSuccess else {
+            appsFreshnessItem.title = refreshingApps ? "Updating..." :
+                appsRefreshError == nil ? "Not updated yet" : "Update failed"
+            appsFreshnessItem.toolTip = appsRefreshError
+            return
+        }
+        let seconds = max(0, Int(Date().timeIntervalSince(updated)))
+        let age: String
+        if seconds < 5 { age = "just now" }
+        else if seconds < 60 { age = "\(seconds)s ago" }
+        else if seconds < 3600 { age = "\(seconds / 60)m ago" }
+        else if seconds < 86400 { age = "\(seconds / 3600)h ago" }
+        else { age = "\(seconds / 86400)d ago" }
+        if refreshingApps {
+            appsFreshnessItem.title = "Updating · last updated \(age)"
+        } else if appsRefreshError != nil || seconds >= 120 {
+            appsFreshnessItem.title = "Stale · updated \(age)"
+        } else if partialAppList {
+            appsFreshnessItem.title = "Partial · updated \(age)"
+        } else {
+            appsFreshnessItem.title = "Updated \(age)"
+        }
+        let format = DateFormatter()
+        format.locale = Locale(identifier: "en_US_POSIX")
+        format.dateFormat = "yyyy-MM-dd HH:mm:ss z"
+        let timestamp = "Last successful list update: \(format.string(from: updated))"
+        let detail = appsRefreshError ?? (partialAppList ? "Some app details are unavailable" : "All app states are read from Fly")
+        appsFreshnessItem.toolTip = "\(timestamp)\n\(detail)"
+        appsItem.toolTip = appsFreshnessItem.title
     }
 
     @objc private func openApp(_ sender: NSMenuItem) {

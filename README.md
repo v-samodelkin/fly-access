@@ -6,8 +6,10 @@ Connect once, browse your apps, and open them when you need them. App discovery 
 
 ```text
 Disconnect
-Apps (2)  >  ◐ my-api
-             ☾ my-worker
+Apps (2)  >  my-api — Running
+             my-worker — Sleeping
+             ───────────────────
+             Updated 12s ago
 ───────────
 Refresh
 Help
@@ -20,7 +22,7 @@ Quit
 - **Help** opens this README online.
 - **Quit** closes the menu; the VPN keeps running.
 
-App state and addresses are available in tooltips. HTTP apps open through Flycast when available, otherwise their public Fly URL. Databases and services without an HTTP route open in the Fly dashboard.
+App states (`Running`, `Sleeping`, and other states) appear beside their names. One shared timestamp at the bottom of the Apps menu shows when the list last updated; its age advances while the menu is open. Failed updates keep the previous data and show `Stale`; incomplete results show `Partial`. Hover over the timestamp for the exact time and over an app for its address. HTTP apps open through Flycast when available, otherwise their public Fly URL. Databases and services without an HTTP route open in the Fly dashboard.
 
 ## Install on macOS
 
