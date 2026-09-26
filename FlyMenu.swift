@@ -66,7 +66,7 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         add("Refresh", #selector(refreshAll))
         add("Help", #selector(help))
-        add("Quit", #selector(quit)).toolTip = "The VPN stays connected."
+        add("Quit", #selector(quit))
         renderApps()
         item.menu = menu
         for (seconds, selector) in [(15.0, #selector(refresh)), (60.0, #selector(loadApps)),
@@ -131,7 +131,6 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                  action: #selector(openApp(_:)), keyEquivalent: "")
             row.target = self
             row.representedObject = app.url
-            row.toolTip = "\(app.organization)\n\(app.detail)\n\(app.url)"
             appsMenu.addItem(row)
         }
         if appsMenu.numberOfItems > 0 { appsMenu.addItem(.separator()) }
@@ -145,7 +144,6 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let updated = lastAppsSuccess else {
             appsFreshnessItem.title = refreshingApps ? "Updating..." :
                 appsRefreshError == nil ? "Not updated yet" : "Update failed"
-            appsFreshnessItem.toolTip = appsRefreshError
             return
         }
         let seconds = max(0, Int(Date().timeIntervalSince(updated)))
@@ -164,13 +162,7 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             appsFreshnessItem.title = "Updated \(age)"
         }
-        let format = DateFormatter()
-        format.locale = Locale(identifier: "en_US_POSIX")
-        format.dateFormat = "yyyy-MM-dd HH:mm:ss z"
-        let timestamp = "Last successful list update: \(format.string(from: updated))"
-        let detail = appsRefreshError ?? (partialAppList ? "Some app details are unavailable" : "All app states are read from Fly")
-        appsFreshnessItem.toolTip = "\(timestamp)\n\(detail)"
-        appsItem.toolTip = appsFreshnessItem.title
+
     }
 
     @objc private func openApp(_ sender: NSMenuItem) {
@@ -192,12 +184,9 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.nextAction = status.action
                     self.setIcon(connected: status.state == "on")
                     self.toggleItem.title = status.action == "off" ? "Disconnect" : "Connect"
-                    self.toggleItem.toolTip = status.detail
-                    self.item.button?.toolTip = "Fly Access: \(status.title)"
                 } else {
                     self.setIcon(connected: false)
                     self.toggleItem.title = "Connect"
-                    self.toggleItem.toolTip = "Unable to check the connection. See Help for setup."
                     self.nextAction = "on"
                 }
                 self.toggleItem.isEnabled = true

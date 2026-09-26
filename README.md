@@ -22,7 +22,7 @@ Quit
 - **Help** opens this README online.
 - **Quit** closes the menu; the VPN keeps running.
 
-App states (`Running`, `Sleeping`, and other states) appear beside their names. One shared timestamp at the bottom of the Apps menu shows when the list last updated; its age advances while the menu is open. Failed updates keep the previous data and show `Stale`; incomplete results show `Partial`. Hover over the timestamp for the exact time and over an app for its address. HTTP apps open through Flycast when available, otherwise their public Fly URL. Databases and services without an HTTP route open in the Fly dashboard.
+App states (`Running`, `Sleeping`, and other states) appear beside their names. One shared timestamp at the bottom of the Apps menu shows when the list last updated; its age advances while the menu is open. Failed updates keep the previous data and show `Stale`; incomplete results show `Partial`. Status and refresh age are shown directly in the menu, without hover tooltips. HTTP apps open through Flycast when available, otherwise their public Fly URL. Databases and services without an HTTP route open in the Fly dashboard.
 
 ## Install on macOS
 
