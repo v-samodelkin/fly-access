@@ -1,8 +1,12 @@
 # Fly Access
 
-A small macOS menu bar app for your private Fly.io network.
+A macOS menu bar app for connecting to your private Fly.io network and opening your apps.
 
-Connect once, browse your apps, and open them when you need them. App discovery does **not** wake sleeping Machines.
+Connect through WireGuard, see which apps are running or sleeping, and click to open one. The app list refreshes once a minute using Fly management metadata. **Browsing the menu does not wake sleeping Machines.**
+
+The menu is written in Swift, with Python scripts for setup and discovery. It uses your existing Fly CLI login and builds locally on your Mac.
+
+[Install](#install-on-macos) · [Network behavior](#network-behavior) · [Troubleshooting](#troubleshooting)
 
 ```text
 Disconnect
@@ -22,11 +26,15 @@ Quit
 - **Help** opens this README online.
 - **Quit** closes the menu; the VPN keeps running.
 
-App states (`Running`, `Sleeping`, and other states) appear beside their names. One shared timestamp at the bottom of the Apps menu shows when the list last updated; its age advances while the menu is open. Failed updates keep the previous data and show `Stale`; incomplete results show `Partial`. Status and refresh age are shown directly in the menu, without hover tooltips. HTTP apps open through Flycast when available, otherwise their public Fly URL. Databases and services without an HTTP route open in the Fly dashboard.
+HTTP apps open through Flycast when configured, or their public Fly URL. Databases and services without an HTTP route open in the Fly dashboard.
+
+The timestamp shows when the app list last updated. If an update fails, the previous list stays visible and is marked `Stale`; incomplete results are marked `Partial`.
 
 ## Install on macOS
 
-Requires Python 3.10+, Homebrew, and the Xcode command line tools (`xcode-select --install`). The menu is built locally; no downloaded app binary or Python packages are needed.
+Requires Python 3.10+, Homebrew, and the Xcode command line tools (`xcode-select --install`). There is no prebuilt download. The installer compiles the menu locally; no Python packages are needed.
+
+### 1. Install dependencies and sign in
 
 ```sh
 brew install flyctl wireguard-tools sops age trash
@@ -35,7 +43,9 @@ git clone https://github.com/v-samodelkin/fly-access.git
 cd fly-access
 ```
 
-Create an age key if you do not already have one. Keep the private key in your password manager or another protected backup.
+### 2. Prepare a WireGuard peer
+
+Setup creates a peer for this Mac and an encrypted backup of its profile using SOPS and age. Create an age key if you do not already have one. Keep the private key in your password manager or another protected backup.
 
 ```sh
 mkdir -p ~/.config/sops/age
@@ -52,14 +62,20 @@ python3 prepare.py --org YOUR_ORG --region ams \
   --age-recipient "$(age-keygen -y ~/.config/sops/age/keys.txt)"
 ```
 
-Install the tunnel, then the menu. The first command uses the standard macOS administrator prompt in your terminal.
+### 3. Install the tunnel and menu
+
+The first command uses the standard macOS administrator prompt in your terminal.
 
 ```sh
 sudo "$(command -v python3)" macos.py install
 python3 install-menu.py
 ```
 
-The app is installed at `~/Applications/Fly Access.app` and starts at login. Private profiles and verified SOPS backups live outside the checkout, under `~/.config/fly-access/`, with restricted permissions. Updating the menu does not change the tunnel or credentials:
+The app is installed at `~/Applications/Fly Access.app` and starts at login. Private profiles and verified SOPS backups live outside the checkout, under `~/.config/fly-access/`, with restricted permissions.
+
+### Update an existing installation
+
+Updating the menu does not change the tunnel or credentials:
 
 ```sh
 git pull --ff-only
