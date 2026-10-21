@@ -17,8 +17,6 @@ RELEASE = {"tag_name": "v1.4", "html_url": "https://github.com/v-samodelkin/fly-
 GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Test",
            "GIT_AUTHOR_EMAIL": "test@example.com", "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.com"}
 FAKE_INSTALL = "from pathlib import Path\nPath(__file__).with_name('installed').write_text('yes')\n"
-FAKE_MACOS = ("import json, sys\nfrom pathlib import Path\n"
-              "print(json.dumps({'state': (Path(__file__).with_name('state').read_text().strip())}))\n")
 
 
 def curl(stdout, code=0):
@@ -68,12 +66,10 @@ class Apply(unittest.TestCase):
         self.git(root, "init", "--quiet", "--bare", "-b", "main", str(self.origin))
         self.git(root, "clone", "--quiet", str(self.origin), str(self.work))
         self.git(self.work, "symbolic-ref", "HEAD", "refs/heads/main")
-        for name, text in (("install-menu.py", FAKE_INSTALL), ("macos.py", FAKE_MACOS),
-                           ("common.py", "# v1.0\n"), ("README.md", "v1.0\n")):
+        for name, text in (("install-menu.py", FAKE_INSTALL), ("common.py", "# v1.0\n"), ("README.md", "v1.0\n")):
             (self.work / name).write_text(text)
         self.release("v1.0")
         self.git(root, "clone", "--quiet", str(self.origin), str(self.checkout))
-        (self.checkout / "state").write_text("on")
 
     def tearDown(self):
         self.env.stop()
@@ -91,36 +87,49 @@ class Apply(unittest.TestCase):
         self.git(self.work, "push", "--quiet", "origin", "main", "--tags")
 
     def apply(self, tag):
-        with patch.object(update, "SOURCE", self.checkout), patch.object(update, "elevate") as elevate, \
-             contextlib.redirect_stdout(io.StringIO()):
-            update.apply(tag, Path("/profiles"))
-        return elevate
+        # The checkout's own remote points elsewhere: releases come only from the upstream repository.
+        self.git(self.checkout, "remote", "set-url", "origin", "https://invalid.example/fork.git")
+        with patch.object(update, "SOURCE", self.checkout), patch.object(update, "UPSTREAM", str(self.origin)), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return update.apply(tag)
 
-    def test_menu_only_release_fast_forwards_and_rebuilds_without_sudo(self):
+    def test_menu_only_release_fast_forwards_to_the_tag_and_rebuilds(self):
         self.release("v1.1", **{"README.md": "v1.1\n"})
         self.release("v1.2", **{"README.md": "unreleased\n"})
-        elevate = self.apply("v1.1")
+        self.assertFalse(self.apply("v1.1"))
         self.assertEqual((self.checkout / "README.md").read_text(), "v1.1\n")
         self.assertTrue((self.checkout / "installed").exists())
-        elevate.assert_not_called()
 
-    def test_tunnel_release_reinstalls_tunnel_only_when_connected(self):
+    def test_reports_tunnel_changes(self):
         self.release("v1.1", **{"common.py": "# v1.1\n"})
-        elevate = self.apply("v1.1")
-        macos = str(self.checkout / "macos.py")
-        elevate.assert_called_once_with([sys.executable, "-B", macos, "install", "--directory", "/profiles"])
-        self.release("v1.2", **{"common.py": "# v1.2\n"})
-        (self.checkout / "state").write_text("off")
-        self.apply("v1.2").assert_not_called()
+        self.assertTrue(self.apply("v1.1"))
+        self.release("v1.2", **{"README.md": "v1.2\n"})
+        self.assertFalse(self.apply("v1.2"))
 
     def test_local_commits_stop_the_update(self):
         self.release("v1.1", **{"README.md": "v1.1\n"})
         (self.checkout / "README.md").write_text("local change\n")
         self.git(self.checkout, "commit", "--quiet", "-am", "local")
-        with self.assertRaises(subprocess.CalledProcessError):
+        with self.assertRaisesRegex(RuntimeError, "local commits"):
             self.apply("v1.1")
         self.assertEqual((self.checkout / "README.md").read_text(), "local change\n")
         self.assertFalse((self.checkout / "installed").exists())
+
+
+
+class Outcome(unittest.TestCase):
+    def test_apply_always_leaves_an_outcome_for_the_menu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = Path(tmp) / "update.json"
+            argv = ["update.py", "apply", "v1.4", "--result", str(result)]
+            for effect, expected in ((lambda tag: True, {"ok": True, "tunnel": True}),
+                                     (RuntimeError("Unable to rebuild the menu"),
+                                      {"ok": False, "error": "Unable to rebuild the menu"})):
+                with self.subTest(expected=expected), patch.object(sys, "argv", argv), \
+                     patch.object(update, "apply", side_effect=effect), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(update.main(), 0 if expected["ok"] else 1)
+                self.assertEqual(json.loads(result.read_text()), expected)
+            self.assertEqual(sorted(os.listdir(tmp)), ["update.json"])
 
 
 if __name__ == "__main__":

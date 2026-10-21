@@ -15,7 +15,7 @@ from layout import LEGACY_MENU_LABEL
 LABEL = "io.flyaccess.menu"
 SOURCE = Path(__file__).resolve().parent
 # Release: bump both, add the version to CHANGELOG.md, then tag vVERSION on main.
-VERSION, BUILD = "1.3", "4"
+VERSION, BUILD = "1.4", "5"
 RESOURCES = ("macos.py", "macos_status.py", "fly_apps.py", "common.py", "layout.py", "update.py")
 
 

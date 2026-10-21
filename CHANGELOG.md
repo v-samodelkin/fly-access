@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4 — 2026-10-21
+
+- Updates run in the background instead of Terminal. When the update finishes, the restarted menu says so. If the release changes the VPN tunnel, it offers **Reconnect**, which asks for your password the same way **Connect** does.
+- Updates download the release tag from the public GitHub repository, whatever remote your checkout uses. Failures show the reason and **Show Log** (`~/Library/Logs/Fly Access/update.log`).
+
 ## 1.3 — 2026-10-21
 
 - **Check for Updates…** in the menu. Twice a day the menu also asks the GitHub API for the latest release, and the item becomes **Update to X…** when one is available.

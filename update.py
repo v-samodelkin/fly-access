@@ -2,11 +2,12 @@
 """Check GitHub for a newer Fly Access release, or update the local checkout to one.
 
 `check` runs from the menu and only asks the GitHub API for the latest release.
-`apply` runs in Terminal: it fast-forwards this checkout to the release tag,
-rebuilds the menu, and reinstalls the tunnel only when its files changed.
+`apply` runs as a one-off launchd job started by the menu: it fast-forwards this
+checkout to the release tag, rebuilds the menu, and reports whether the tunnel changed.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -14,9 +15,10 @@ import sys
 
 REPOSITORY = "v-samodelkin/fly-access"
 LATEST = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
+UPSTREAM = f"https://github.com/{REPOSITORY}.git"
 SOURCE = Path(__file__).resolve().parent
 TAG = re.compile(r"v(\d+)\.(\d+)(?:\.(\d+))?")
-# A change in these files also needs `sudo macos.py install`; everything else ships with the menu.
+# A change in these files also needs a reconnect (macos.py install); everything else ships with the menu.
 TUNNEL_FILES = ("macos.py", "common.py", "layout.py")
 
 
@@ -51,34 +53,33 @@ def check(current):
     return {"ok": True, "current": current, "tag": tag, "url": url, "available": version(tag) > version(current)}
 
 
-def git(*args):
-    return subprocess.run(["git", "-C", str(SOURCE), *args], check=True, capture_output=True, text=True).stdout.strip()
+def git(message, *args):
+    result = subprocess.run(["git", "-C", str(SOURCE), *args], capture_output=True, text=True)
+    if result.returncode:
+        print(result.stderr.strip(), file=sys.stderr)  # Details go to the update log.
+        raise RuntimeError(message)
+    return result.stdout.strip()
 
 
-def elevate(argv):
-    subprocess.run(["sudo", *argv], check=True)
-
-
-def apply(tag, directory):
+def apply(tag):
+    """Fast-forward the checkout to the tag and rebuild the menu; return whether the tunnel changed."""
     version(tag)
-    previous = git("rev-parse", "HEAD")
-    print(f"Updating {SOURCE} to {tag}...")
-    git("fetch", "--quiet", "--tags", "origin")
-    git("merge", "--ff-only", "--quiet", f"refs/tags/{tag}")
-    subprocess.run([sys.executable, str(SOURCE / "install-menu.py")], check=True)
-    if subprocess.run(["git", "-C", str(SOURCE), "diff", "--quiet", previous, "HEAD", "--", *TUNNEL_FILES]).returncode:
-        macos = [sys.executable, "-B", str(SOURCE / "macos.py")]
-        status = subprocess.run(macos + ["status", "--directory", str(directory)], capture_output=True, text=True)
-        try:
-            connected = json.loads(status.stdout).get("state") == "on"
-        except ValueError:
-            connected = False
-        if connected:
-            print("This release also updates the tunnel. macOS asks for your password; the VPN reconnects.")
-            elevate(macos + ["install", "--directory", str(directory)])
-        else:
-            print("This release also updates the tunnel. Choose Connect in the menu to apply it.")
-    print(f"Fly Access is now {tag[1:]}.")
+    previous = git("Unable to read the checkout", "rev-parse", "HEAD")
+    print(f"Updating {SOURCE} to {tag}", flush=True)
+    # Fetch from the public repository, so the checkout's remotes and SSH keys do not matter.
+    git("Unable to download the release from GitHub", "fetch", "--quiet", "--no-tags", UPSTREAM,
+        f"refs/tags/{tag}:refs/tags/{tag}")
+    git("The checkout has local commits or edits; update it with git", "merge", "--ff-only", "--quiet", f"refs/tags/{tag}")
+    if subprocess.run([sys.executable, str(SOURCE / "install-menu.py")]).returncode:
+        raise RuntimeError("Unable to rebuild the menu")
+    changed = subprocess.run(["git", "-C", str(SOURCE), "diff", "--quiet", previous, "HEAD", "--", *TUNNEL_FILES])
+    return changed.returncode != 0
+
+
+def save(path, outcome):
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(outcome))
+    os.replace(temporary, path)
 
 
 def main():
@@ -87,7 +88,7 @@ def main():
     commands.add_parser("check").add_argument("--current", required=True)
     update = commands.add_parser("apply")
     update.add_argument("tag")
-    update.add_argument("--directory", type=Path, required=True)
+    update.add_argument("--result", type=Path, required=True, help="JSON outcome for the menu")
     args = parser.parse_args()
     if args.action == "check":
         try:
@@ -97,15 +98,12 @@ def main():
         print(json.dumps(result))
         return 0 if result["ok"] else 1
     try:
-        apply(args.tag, args.directory)
-    except subprocess.CalledProcessError as error:
-        details = (error.stderr or "").strip()
-        print("Update failed" + (": " + details if details else "."), file=sys.stderr)
-        return 1
-    except ValueError as error:
-        print(error, file=sys.stderr)
-        return 1
-    return 0
+        outcome = {"ok": True, "tunnel": apply(args.tag)}
+    except (RuntimeError, ValueError) as error:
+        outcome = {"ok": False, "error": str(error)}
+    print(json.dumps(outcome))
+    save(args.result, outcome)
+    return 0 if outcome["ok"] else 1
 
 
 if __name__ == "__main__":

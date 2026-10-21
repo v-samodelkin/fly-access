@@ -31,6 +31,12 @@ struct UpdateResult: Decodable {
     let error: String?
 }
 
+struct UpdateOutcome: Decodable {
+    let ok: Bool
+    let tunnel: Bool?
+    let error: String?
+}
+
 final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var item: NSStatusItem!
     private let menu = NSMenu()
@@ -53,6 +59,11 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var availableTag: String?
     private var checkingUpdates = false
     private var nextUpdateCheck = Date.distantPast
+    private var updateStarted: Date?
+    private let updateLabel = "io.flyaccess.update"
+    private let logs = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Fly Access")
+    private var updateLog: URL { logs.appendingPathComponent("update.log") }
+    private var updateOutcome: URL { logs.appendingPathComponent("update.json") }
     private let python = Bundle.main.object(forInfoDictionaryKey: "PythonPath") as! String
     private let fly = Bundle.main.object(forInfoDictionaryKey: "FlyPath") as! String
     private let directory = Bundle.main.object(forInfoDictionaryKey: "ProfileDirectory") as! String
@@ -87,7 +98,8 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
         renderApps()
         item.menu = menu
         for (seconds, selector) in [(15.0, #selector(refresh)), (60.0, #selector(loadApps)),
-                                    (1.0, #selector(updateAppsFreshness)), (900.0, #selector(checkForUpdatesWhenDue))] {
+                                    (1.0, #selector(updateAppsFreshness)), (900.0, #selector(checkForUpdatesWhenDue)),
+                                    (2.0, #selector(watchUpdate))] {
             let timer = Timer(timeInterval: seconds, target: self, selector: selector,
                               userInfo: nil, repeats: true)
             RunLoop.main.add(timer, forMode: .common)
@@ -95,6 +107,7 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         refreshAll()
         checkForUpdatesWhenDue()
+        watchUpdate()
     }
 
     @discardableResult private func add(_ title: String, _ action: Selector) -> NSMenuItem {
@@ -153,7 +166,7 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Fly Access \(tag.dropFirst()) is available"
-        alert.informativeText = "You have \(version). The update runs in Terminal: it fast-forwards your fly-access checkout to \(tag), rebuilds the menu, and asks for your password only if the tunnel changed."
+        alert.informativeText = "You have \(version). The update fast-forwards your fly-access checkout to \(tag) and restarts the menu. The VPN stays connected."
         alert.addButton(withTitle: "Update")
         alert.addButton(withTitle: "View Changelog")
         alert.addButton(withTitle: "Later")
@@ -164,23 +177,88 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // Terminal runs the update outside this app, so rebuilding and restarting the menu cannot cut it short.
+    // A one-off launchd job runs the update outside this app's job, so restarting the menu cannot cut it short.
     private func startUpdate(_ tag: String) {
         guard let source = source, FileManager.default.fileExists(atPath: source + "/update.py") else {
             inform("Unable to find your fly-access checkout",
                    "Run git pull --ff-only and python3 install-menu.py in the checkout. See Help.")
             return
         }
-        let script = "#!/bin/sh\ncd \(shellQuote(source)) || exit 1\nexec \(shellQuote(python)) -B update.py apply \(shellQuote(tag)) --directory \(shellQuote(directory))\n"
-        let file = FileManager.default.temporaryDirectory.appendingPathComponent("Fly Access Update.command")
+        let folders = [fly, python].map { ($0 as NSString).deletingLastPathComponent }
+        let job: [String: Any] = [
+            "Label": updateLabel, "RunAtLoad": true,
+            "ProgramArguments": [python, "-B", source + "/update.py", "apply", tag, "--result", updateOutcome.path],
+            "EnvironmentVariables": ["PATH": (folders + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+                                                         "/usr/sbin", "/sbin"]).joined(separator: ":")],
+            "StandardOutPath": updateLog.path, "StandardErrorPath": updateLog.path]
+        let plist = FileManager.default.temporaryDirectory.appendingPathComponent(updateLabel + ".plist")
         do {
-            try script.write(to: file, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
+            try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+            for old in [updateOutcome, updateLog] where FileManager.default.fileExists(atPath: old.path) {
+                try FileManager.default.removeItem(at: old)
+            }
+            try PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0).write(to: plist)
         } catch {
             inform("Unable to start the update", error.localizedDescription)
             return
         }
-        NSWorkspace.shared.open(file)
+        let domain = "gui/\(getuid())"
+        _ = run("/bin/launchctl", ["bootout", "\(domain)/\(updateLabel)"])  // A finished earlier update stays loaded.
+        let started = run("/bin/launchctl", ["bootstrap", domain, plist.path])
+        guard started.0 == 0 else {
+            inform("Unable to start the update", started.2)
+            return
+        }
+        updateStarted = Date()
+        updateItem.title = "Updating to \(tag.dropFirst())…"
+        updateItem.isEnabled = false
+    }
+
+    // The job writes its outcome last. After a successful update the restarted menu reads it.
+    @objc private func watchUpdate() {
+        guard let data = try? Data(contentsOf: updateOutcome) else {
+            if let started = updateStarted, Date().timeIntervalSince(started) > 900 {
+                updateStarted = nil
+                updateItem.isEnabled = true
+                updateItem.title = "Check for Updates…"
+                reportUpdateFailure("The update did not finish.")
+            }
+            return
+        }
+        try? FileManager.default.removeItem(at: updateOutcome)
+        updateStarted = nil
+        updateItem.isEnabled = true
+        let decoded = try? JSONDecoder().decode(UpdateOutcome.self, from: data)
+        guard let outcome = decoded, outcome.ok else {
+            updateItem.title = availableTag.map { "Update to \($0.dropFirst())…" } ?? "Check for Updates…"
+            reportUpdateFailure(decoded?.error ?? "The update failed.")
+            return
+        }
+        availableTag = nil
+        updateItem.title = "Check for Updates…"
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Fly Access is now \(version)"
+        if outcome.tunnel == true {
+            alert.informativeText = "This release also updates the VPN tunnel. Reconnect to apply it; macOS asks for your password."
+            alert.addButton(withTitle: "Reconnect")
+            alert.addButton(withTitle: "Later")
+            if alert.runModal() == .alertFirstButtonReturn { change("on") }
+        } else {
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "View Changelog")
+            if alert.runModal() == .alertSecondButtonReturn { changelog() }
+        }
+    }
+
+    private func reportUpdateFailure(_ reason: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Update failed"
+        alert.informativeText = reason.hasSuffix(".") ? reason : reason + "."
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Show Log")
+        if alert.runModal() == .alertSecondButtonReturn { NSWorkspace.shared.open(updateLog) }
     }
 
     private func inform(_ title: String, _ text: String) {

@@ -79,11 +79,13 @@ The app is installed at `~/Applications/Fly Access.app` and starts at login. Pri
 
 ### Update an existing installation
 
-The menu checks GitHub for a new release twice a day; this request goes only to `api.github.com`. Choose **Update to X…** to update. Terminal opens and runs `update.py` in the checkout you installed from:
+The menu checks GitHub for a new release twice a day; this request goes only to `api.github.com`. Choose **Update to X…** to update. The update runs in the background with `update.py` from the checkout you installed from:
 
-1. It fast-forwards the checkout to the release tag. Local commits or edits stop the update before anything is changed.
-2. It rebuilds and restarts the menu.
-3. If the release changes the tunnel and the VPN is connected, it runs `sudo macos.py install`, which asks for your password and reconnects the VPN. When the VPN is off, choose **Connect** later to apply the change.
+1. It downloads the release tag from this public repository and fast-forwards your checkout to it. Local commits or edits stop the update before anything changes.
+2. It rebuilds and restarts the menu. The VPN stays connected.
+3. If the release changes the tunnel, the menu offers **Reconnect**, which asks for your password just like **Connect**.
+
+The log of the last update is in `~/Library/Logs/Fly Access/update.log`.
 
 To update by hand, or from a version before 1.3:
 
