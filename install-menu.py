@@ -14,6 +14,8 @@ from layout import LEGACY_MENU_LABEL
 
 LABEL = "io.flyaccess.menu"
 SOURCE = Path(__file__).resolve().parent
+VERSION, BUILD = "1.1", "2"
+RESOURCES = ("macos.py", "macos_status.py", "fly_apps.py", "common.py", "layout.py", "hosts.py")
 
 
 def install(directory=None):
@@ -40,10 +42,10 @@ def install(directory=None):
         resources.mkdir()
         subprocess.run(["/usr/bin/swiftc", "-swift-version", "5", "-O", "-framework", "Cocoa",
                         str(SOURCE / "FlyMenu.swift"), "-o", str(contents / "MacOS/FlyMenu")], check=True)
-        for filename in ("macos.py", "macos_status.py", "fly_apps.py", "common.py", "layout.py"):
+        for filename in RESOURCES:
             shutil.copy2(SOURCE / filename, resources / filename)
         info = {"CFBundleIdentifier": LABEL, "CFBundleName": "Fly Access", "CFBundleExecutable": "FlyMenu",
-                "CFBundlePackageType": "APPL", "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
+                "CFBundlePackageType": "APPL", "CFBundleVersion": BUILD, "CFBundleShortVersionString": VERSION,
                 "LSUIElement": True, "NSHighResolutionCapable": True,
                 "PythonPath": sys.executable, "FlyPath": fly, "ProfileDirectory": str(directory.expanduser().resolve())}
         (contents / "Info.plist").write_bytes(plistlib.dumps(info))

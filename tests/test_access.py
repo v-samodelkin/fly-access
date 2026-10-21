@@ -1,15 +1,18 @@
 """Validate network boundaries and secret handling without touching system networking."""
+import ast
 import base64
 import configparser
+import importlib.util
 from pathlib import Path
 import plistlib
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from common import REPO, external_directory, parse_profile, private_write, render_profile, run_private
+import hosts
 import macos
 from macos_status import autostart_enabled, classify
 
@@ -80,6 +83,26 @@ class Profiles(unittest.TestCase):
         self.assertTrue(job["KeepAlive"])
         self.assertTrue(job["RunAtLoad"])
 
+    def test_hosts_job_runs_root_owned_copy_with_system_python(self):
+        job = plistlib.loads(plistlib.dumps(macos.hosts_plist("fdaa:0:1234::3", "fdaa:0:1234::/48")))
+        self.assertEqual(job["Label"], macos.HOSTS_LABEL)
+        self.assertEqual(job["ProgramArguments"], ["/usr/bin/python3", "-I", "-B", str(macos.STATE / "hosts.py"), "sync",
+                                                   "--dns", "fdaa:0:1234::3", "--network", "fdaa:0:1234::/48"])
+        self.assertEqual(job["StartInterval"], 60)
+        self.assertNotIn("KeepAlive", job)
+
+    def test_menu_bundle_ships_every_local_module(self):
+        spec = importlib.util.spec_from_file_location("install_menu", REPO / "install-menu.py")
+        menu = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(menu)
+        local = {path.stem for path in REPO.glob("*.py")}
+        for script in ("macos.py", "fly_apps.py"):
+            tree = ast.parse((REPO / script).read_text())
+            names = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+            names |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+            for name in names & local:
+                self.assertIn(name + ".py", menu.RESOURCES)
+
     def test_existing_resolver_is_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -87,7 +110,10 @@ class Profiles(unittest.TestCase):
             resolvers.mkdir()
             target = resolvers / "internal"
             target.write_text("nameserver 192.0.2.1\n")
-            with patch.object(macos, "RESOLVERS", resolvers), patch.object(macos, "STATE", root / "state"), patch.object(macos, "PLIST", root / "job.plist"):
+            (root / "hosts").write_text("127.0.0.1 localhost\n")
+            with patch.object(macos, "RESOLVERS", resolvers), patch.object(macos, "STATE", root / "state"), \
+                 patch.object(macos, "PLIST", root / "job.plist"), patch.object(macos, "HOSTS_PLIST", root / "hosts.plist"), \
+                 patch.object(hosts, "HOSTS", root / "hosts"):
                 with self.assertRaises(RuntimeError):
                     macos.preflight()
             self.assertEqual(target.read_text(), "nameserver 192.0.2.1\n")
@@ -106,6 +132,26 @@ class Profiles(unittest.TestCase):
         for value in ("enabled", "false"):
             self.assertTrue(autostart_enabled(f'"{macos.LABEL}" => {value}'))
 
+    def test_preflight_refuses_foreign_hosts_job_and_damaged_hosts_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state, resolvers, hosts_file = root / "state", root / "resolver", root / "hosts"
+            state.mkdir(); resolvers.mkdir()
+            (state / ".managed").write_text(macos.MANAGED + "\n")
+            job = root / "hosts.plist"
+            job.write_bytes(plistlib.dumps({"Label": "com.example.other"}))
+            hosts_file.write_text("127.0.0.1 localhost\n")
+            with patch.object(macos, "RESOLVERS", resolvers), patch.object(macos, "STATE", state), \
+                 patch.object(macos, "PLIST", root / "job.plist"), patch.object(macos, "HOSTS_PLIST", job), \
+                 patch.object(hosts, "HOSTS", hosts_file):
+                with self.assertRaisesRegex(RuntimeError, "hosts job"):
+                    macos.preflight()
+                job.write_bytes(plistlib.dumps({"Label": macos.HOSTS_LABEL}))
+                macos.preflight()
+                hosts_file.write_text("127.0.0.1 localhost\n" + hosts.BEGIN + "\n")
+                with self.assertRaises(ValueError):
+                    macos.preflight()
+
     def test_off_removes_only_our_resolvers_and_disables_autostart(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -116,12 +162,18 @@ class Profiles(unittest.TestCase):
                 (resolvers / domain).write_text(macos.MANAGED + "\nnameserver fdaa:0:1234::3\n")
             unrelated = resolvers / "corp.example"
             unrelated.write_text("nameserver 192.0.2.1\n")
+            hosts_file = root / "hosts"
+            hosts_file.write_text(hosts.render("127.0.0.1 localhost\n", [("fdaa:0:1234:0:1::2", "my-api.flycast")]))
             with patch.object(macos, "STATE", state), patch.object(macos, "RESOLVERS", resolvers), \
-                 patch.object(macos, "PLIST", root / "job.plist"), patch.object(macos, "checked") as run, \
+                 patch.object(macos, "PLIST", root / "job.plist"), patch.object(macos, "HOSTS_PLIST", root / "hosts.plist"), \
+                 patch.object(hosts, "HOSTS", hosts_file), patch.object(hosts, "flush"), \
+                 patch.object(macos, "checked") as run, \
                  patch.object(macos, "stop"), patch.object(macos, "brew_bin", return_value=Path("/fake")), \
                  patch.object(macos.subprocess, "run"):
                 macos.turn_off()
-            run.assert_called_once_with(["launchctl", "disable", f"system/{macos.LABEL}"])
+            self.assertEqual(run.call_args_list, [call(["launchctl", "disable", f"system/{label}"])
+                                                  for label in (macos.LABEL, macos.HOSTS_LABEL)])
+            self.assertEqual(hosts_file.read_text(), "127.0.0.1 localhost\n")
             self.assertEqual(unrelated.read_text(), "nameserver 192.0.2.1\n")
             for domain in macos.DOMAINS:
                 self.assertFalse((resolvers / domain).exists())

@@ -20,6 +20,8 @@ def existing_legacy():
 LABEL, STATE, TUNNEL_NAME, MANAGED = paths(existing_legacy())
 PROFILE = STATE / (TUNNEL_NAME + '.conf')
 PLIST = Path('/Library/LaunchDaemons') / (LABEL + '.plist')
+HOSTS_LABEL = LABEL + '.hosts'
+HOSTS_PLIST = Path('/Library/LaunchDaemons') / (HOSTS_LABEL + '.plist')
 
 
 def profile_directory(home):

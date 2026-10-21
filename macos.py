@@ -12,10 +12,13 @@ import sys
 import time
 
 from common import parse_profile, private_write, render_profile, trash
-from layout import LABEL, MANAGED, STATE, PROFILE, PLIST, TUNNEL_NAME, device_profile, profile_directory
+import hosts
+from layout import HOSTS_LABEL, HOSTS_PLIST, LABEL, MANAGED, STATE, PROFILE, PLIST, TUNNEL_NAME, device_profile, profile_directory
 
 DOMAINS = ("flycast", "internal")
 RESOLVERS = Path("/etc/resolver")
+# A root job must not run a user-writable interpreter; this one is protected by SIP.
+SYSTEM_PYTHON = Path("/usr/bin/python3")
 
 
 def default_directory():
@@ -37,6 +40,13 @@ def launch_plist(folder):
             "StandardOutPath": str(STATE / "tunnel.log"), "StandardErrorPath": str(STATE / "tunnel.log")}
 
 
+def hosts_plist(dns, network):
+    """Refresh .flycast hosts entries from Fly DNS once a minute; lookups never reach an app."""
+    return {"Label": HOSTS_LABEL, "ProgramArguments": [str(SYSTEM_PYTHON), "-I", "-B", str(STATE / "hosts.py"),
+                                                       "sync", "--dns", dns, "--network", network],
+            "RunAtLoad": True, "StartInterval": 60, "ProcessType": "Background"}
+
+
 def checked(argv):
     result = subprocess.run(argv, capture_output=True, text=True)
     if result.returncode:
@@ -45,7 +55,7 @@ def checked(argv):
 
 
 def preflight():
-    if STATE.is_symlink() or PLIST.is_symlink() or RESOLVERS.is_symlink():
+    if any(path.is_symlink() for path in (STATE, PLIST, HOSTS_PLIST, RESOLVERS, hosts.HOSTS)):
         raise RuntimeError("Refusing existing symlinks in system configuration")
     if STATE.exists() and not (STATE / ".managed").exists():
         raise RuntimeError("Existing state directory is not owned by this installer")
@@ -53,15 +63,23 @@ def preflight():
         raise RuntimeError("An unmanaged tunnel with this name already exists")
     if PLIST.exists() and (not (STATE / ".managed").exists() or plistlib.loads(PLIST.read_bytes()).get("Label") != LABEL):
         raise RuntimeError("Existing launchd job is not owned by this installer")
+    if HOSTS_PLIST.exists() and (not (STATE / ".managed").exists() or plistlib.loads(HOSTS_PLIST.read_bytes()).get("Label") != HOSTS_LABEL):
+        raise RuntimeError("Existing hosts job is not owned by this installer")
+    hosts.render(hosts.HOSTS.read_text(), [])  # Rejects a damaged managed block before any change.
     for domain in DOMAINS:
         path = RESOLVERS / domain
         if path.is_symlink() or (path.exists() and not path.read_text().startswith(MANAGED + "\n")):
             raise RuntimeError(f"Existing resolver for {domain}; refusing to overwrite it")
 
 
+def loaded(label):
+    return subprocess.run(["launchctl", "print", f"system/{label}"], capture_output=True).returncode == 0
+
+
 def stop(folder):
-    active = subprocess.run(["launchctl", "print", f"system/{LABEL}"], capture_output=True).returncode == 0
-    if active:
+    if loaded(HOSTS_LABEL):
+        checked(["launchctl", "bootout", f"system/{HOSTS_LABEL}"])
+    if loaded(LABEL):
         checked(["launchctl", "bootout", f"system/{LABEL}"])
         time.sleep(1)
     # Clean up a leftover interface if launchd already stopped the job's processes.
@@ -74,11 +92,12 @@ def install(args):
     folder = brew_bin()
     config = parse_profile(device_profile(args.directory, "macos").read_text())
     preflight()  # Validate everything before modifying system files.
-    dns = config["Interface"]["dns"]
+    dns, network = config["Interface"]["dns"], config["Peer"]["allowedips"]
     expected = render_profile(config, split=True)
     if args.dry_run:
         print("Valid private /48 profile; no global DNS, hooks or default route.")
-        print("Would install launchd job and resolvers for .flycast and .internal only.")
+        print("Would install launchd job and resolvers for .flycast and .internal only,")
+        print("and keep .flycast names in a managed /etc/hosts block while connected.")
         return
     stop(folder)
     STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -92,21 +111,36 @@ def install(args):
         path.chmod(0o644)
     private_write(PLIST, plistlib.dumps(launch_plist(folder)))
     PLIST.chmod(0o644)
+    private_write(STATE / "hosts.py", Path(hosts.__file__).read_text())
+    private_write(HOSTS_PLIST, plistlib.dumps(hosts_plist(dns, network)))
+    HOSTS_PLIST.chmod(0o644)
     if not (STATE / "tunnel.log").exists():
         private_write(STATE / "tunnel.log", "")
     subprocess.run(["dscacheutil", "-flushcache"], check=True)
     checked(["launchctl", "enable", f"system/{LABEL}"])
     checked(["launchctl", "bootstrap", "system", str(PLIST)])
+    confirmed = handshake(folder)
+    try:
+        hosts.sync(dns, network)  # .flycast names work as soon as Connect returns.
+    except RuntimeError:
+        pass  # The hosts job retries every minute.
+    checked(["launchctl", "enable", f"system/{HOSTS_LABEL}"])
+    checked(["launchctl", "bootstrap", "system", str(HOSTS_PLIST)])
+    if not confirmed:
+        raise RuntimeError("Installed, but handshake not confirmed. Check tunnel.log; no global DNS was changed.")
+    print("Installed: launchd autostart, private route, split DNS, .flycast hosts; handshake confirmed.")
+
+
+def handshake(folder):
     for _ in range(20):
         namefile = Path("/var/run/wireguard") / (TUNNEL_NAME + ".name")
         if namefile.exists():
             interface = namefile.read_text().strip()
             result = subprocess.run([str(folder / "wg"), "show", interface, "latest-handshakes"], capture_output=True, text=True)
             if result.returncode == 0 and any(int(line.split()[-1]) > 0 for line in result.stdout.splitlines()):
-                print("Installed: launchd autostart, private route, split DNS; handshake confirmed.")
-                return
+                return True
         time.sleep(1)
-    raise RuntimeError("Installed, but handshake not confirmed. Check tunnel.log; no global DNS was changed.")
+    return False
 
 
 def turn_off():
@@ -115,24 +149,27 @@ def turn_off():
         raise RuntimeError("Install the tunnel first")
     # Disable persists across reboot; merely stopping a KeepAlive job would restart it.
     checked(["launchctl", "disable", f"system/{LABEL}"])
+    checked(["launchctl", "disable", f"system/{HOSTS_LABEL}"])
     stop(brew_bin())
+    hosts.remove()
     for domain in DOMAINS:
         path = RESOLVERS / domain
         if path.exists():
             path.replace(STATE / f"resolver-{domain}.disabled")
     subprocess.run(["dscacheutil", "-flushcache"], check=True)
-    print("VPN and split DNS disabled; they remain off after reboot. Profiles retained.")
+    print("VPN, split DNS and .flycast hosts disabled; they remain off after reboot. Profiles retained.")
 
 
 def uninstall():
     preflight()
     stop(brew_bin())
-    targets = [PLIST, STATE] + [RESOLVERS / domain for domain in DOMAINS]
+    hosts.remove()
+    targets = [PLIST, HOSTS_PLIST, STATE] + [RESOLVERS / domain for domain in DOMAINS]
     for path in targets:
         if path.exists():
             trash(path)
     subprocess.run(["dscacheutil", "-flushcache"], check=True)
-    print("Removed local tunnel and managed resolvers. Private backups and Fly peers retained.")
+    print("Removed local tunnel, managed resolvers and hosts entries. Private backups and Fly peers retained.")
 
 
 def check(args):

@@ -82,11 +82,13 @@ git pull --ff-only
 python3 install-menu.py
 ```
 
+Some releases also change the tunnel side (1.1 adds the `.flycast` hosts job). To apply them, choose **Disconnect** and then **Connect** in the menu, or run `sudo "$(command -v python3)" macos.py install` again.
+
 Existing installations retain their profile directory and tunnel identity. No peer is silently replaced. Use a separate `--directory` and `--prefix` when preparing another organization or another device of the same type.
 
 ## Sleeping apps stay asleep
 
-Discovery runs every minute and uses only `fly apps list`, `fly machine list`, and `fly ips list`. Connection status checks use the private DNS server, not your applications. There are no HTTP health probes, database connections, favicon downloads, or app previews in the background.
+Discovery runs every minute and uses only `fly apps list`, `fly machine list`, and `fly ips list`. Connection status checks and the `.flycast` hosts job use the private DNS server, not your applications. There are no HTTP health probes, database connections, favicon downloads, or app previews in the background.
 
 An app-directed request begins only when you click its menu item. Browsers and applications can keep connections open afterward, which may prevent that app from sleeping. The app list is kept in memory and refreshed from Fly; during an API outage the previous list remains marked as stale.
 
@@ -95,6 +97,8 @@ Flycast requires a private IP and a configured service. Private web apps normall
 ## Network behavior
 
 Only Fly's private IPv6 `/48` is routed through the VPN. On macOS, DNS for `.flycast` and `.internal` goes to Fly; your default route and public DNS remain unchanged. Turn off another conflicting VPN if it captures these routes or domains. Browser Secure DNS / DoH can bypass the system's private DNS settings.
+
+While connected, a small root job also keeps the Flycast address of each app in a marked block at the end of `/etc/hosts`. Without this block, Macs without a global IPv6 address cannot resolve `.flycast` names (see [Troubleshooting](#troubleshooting)). Once a minute the job reads `_apps.internal` and `APP.flycast` AAAA records from Fly's private DNS server. It only accepts `.flycast` names with addresses inside your `/48`. It never edits lines outside its block. A failed lookup leaves the block unchanged, and **Disconnect** removes it.
 
 Disconnect persists across reboot. Reconnect through the menu to enable automatic startup again. The menu and the tunnel are separate processes, so quitting the menu does not disconnect the network.
 
@@ -115,7 +119,22 @@ python3 macos.py check --host YOUR_APP.flycast --port 80
 sudo "$(command -v python3)" macos.py on
 ```
 
-Tunnel logs: `/Library/Application Support/FlyAccess/tunnel.log`. Older installations retain their original state directory. To remove the managed tunnel and resolvers while retaining your private backups and remote peers:
+### `APP.flycast` does not open, but its address resolves
+
+Symptoms: the browser cannot find the server, or `curl http://APP.flycast/` fails with `Could not resolve host` (exit code 6). Meanwhile `dscacheutil -q host -a name APP.flycast` returns an `fdaa:` address, and the app responds at its IPv6 literal.
+
+Cause: on a network without global IPv6, macOS asks only for A records, and Flycast names have only AAAA records. `scutil --dns` shows `flags : Request A records` for the `flycast` resolver. Opening the IPv6 literal does not help apps that check the `Host` header.
+
+Fix: Fly Access 1.1 adds a hosts block for these names. Update the menu, reconnect, then check:
+
+```sh
+sed -n '/^# BEGIN Fly Access/,/^# END Fly Access/p' /etc/hosts
+python3 -c 'import socket, sys; print(socket.getaddrinfo(sys.argv[1], 80)[0][4][0])' YOUR_APP.flycast
+```
+
+The block lists only apps that have a Flycast address (`fly ips allocate-v6 --private`). It updates within a minute after you add one. Remove any `.flycast` lines you added to `/etc/hosts` by hand. If the block is missing while connected, run `sudo "$(command -v python3)" macos.py install`.
+
+Tunnel logs: `/Library/Application Support/FlyAccess/tunnel.log`. Older installations retain their original state directory. To remove the managed tunnel, resolvers, and hosts block while retaining your private backups and remote peers:
 
 ```sh
 sudo "$(command -v python3)" macos.py uninstall
