@@ -14,8 +14,8 @@ from layout import LEGACY_MENU_LABEL
 
 LABEL = "io.flyaccess.menu"
 SOURCE = Path(__file__).resolve().parent
-VERSION, BUILD = "1.1", "2"
-RESOURCES = ("macos.py", "macos_status.py", "fly_apps.py", "common.py", "layout.py", "hosts.py")
+VERSION, BUILD = "1.2", "3"
+RESOURCES = ("macos.py", "macos_status.py", "fly_apps.py", "common.py", "layout.py")
 
 
 def install(directory=None):
