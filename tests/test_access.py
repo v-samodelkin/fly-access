@@ -5,6 +5,7 @@ import configparser
 import importlib.util
 from pathlib import Path
 import plistlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -99,6 +100,10 @@ class Profiles(unittest.TestCase):
             names |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
             for name in names & local:
                 self.assertIn(name + ".py", menu.RESOURCES)
+        for name in re.findall(r'resource\("([^"]+)"\)', (REPO / "FlyMenu.swift").read_text()):
+            self.assertIn(name, menu.RESOURCES)
+        # The update check compares this version with the latest GitHub release.
+        self.assertEqual(re.search(r"^## (\S+)", (REPO / "CHANGELOG.md").read_text(), re.M).group(1), menu.VERSION)
 
     def test_existing_resolver_is_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:

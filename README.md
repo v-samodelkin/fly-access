@@ -16,6 +16,8 @@ Apps (2)  >  my-api — Running
              Updated 12s ago
 ───────────
 Refresh
+Check for Updates…
+Changelog
 Help
 Quit
 ```
@@ -23,6 +25,8 @@ Quit
 - **Connect / Disconnect** switches the VPN and private DNS together.
 - **Apps** lists every app available to your Fly login, including sleeping apps. Click to open it in your default browser.
 - **Refresh** updates the connection and app list. Updates also happen automatically.
+- **Check for Updates…** asks GitHub for the latest release. When a newer one exists, the item reads **Update to X…** (see [Update](#update-an-existing-installation)).
+- **Changelog** opens [CHANGELOG.md](CHANGELOG.md) online.
 - **Help** opens this README online.
 - **Quit** closes the menu; the VPN keeps running.
 
@@ -75,14 +79,20 @@ The app is installed at `~/Applications/Fly Access.app` and starts at login. Pri
 
 ### Update an existing installation
 
-Updating the menu does not change the tunnel or credentials:
+The menu checks GitHub for a new release twice a day; this request goes only to `api.github.com`. Choose **Update to X…** to update. Terminal opens and runs `update.py` in the checkout you installed from:
+
+1. It fast-forwards the checkout to the release tag. Local commits or edits stop the update before anything is changed.
+2. It rebuilds and restarts the menu.
+3. If the release changes the tunnel and the VPN is connected, it runs `sudo macos.py install`, which asks for your password and reconnects the VPN. When the VPN is off, choose **Connect** later to apply the change.
+
+To update by hand, or from a version before 1.3:
 
 ```sh
 git pull --ff-only
 python3 install-menu.py
 ```
 
-Some releases also change the tunnel side; 1.2 updates the resolver files. To apply such changes, choose **Disconnect** and then **Connect** in the menu, or run `sudo "$(command -v python3)" macos.py install` again.
+If [CHANGELOG.md](CHANGELOG.md) mentions tunnel changes, also choose **Disconnect** and then **Connect** in the menu, or run `sudo "$(command -v python3)" macos.py install`. Updating the menu alone does not change the tunnel or credentials.
 
 Existing installations retain their profile directory and tunnel identity. No peer is silently replaced. Use a separate `--directory` and `--prefix` when preparing another organization or another device of the same type.
 

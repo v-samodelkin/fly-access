@@ -14,8 +14,9 @@ from layout import LEGACY_MENU_LABEL
 
 LABEL = "io.flyaccess.menu"
 SOURCE = Path(__file__).resolve().parent
-VERSION, BUILD = "1.2", "3"
-RESOURCES = ("macos.py", "macos_status.py", "fly_apps.py", "common.py", "layout.py")
+# Release: bump both, add the version to CHANGELOG.md, then tag vVERSION on main.
+VERSION, BUILD = "1.3", "4"
+RESOURCES = ("macos.py", "macos_status.py", "fly_apps.py", "common.py", "layout.py", "update.py")
 
 
 def install(directory=None):
@@ -47,7 +48,8 @@ def install(directory=None):
         info = {"CFBundleIdentifier": LABEL, "CFBundleName": "Fly Access", "CFBundleExecutable": "FlyMenu",
                 "CFBundlePackageType": "APPL", "CFBundleVersion": BUILD, "CFBundleShortVersionString": VERSION,
                 "LSUIElement": True, "NSHighResolutionCapable": True,
-                "PythonPath": sys.executable, "FlyPath": fly, "ProfileDirectory": str(directory.expanduser().resolve())}
+                "PythonPath": sys.executable, "FlyPath": fly, "ProfileDirectory": str(directory.expanduser().resolve()),
+                "SourceDirectory": str(SOURCE)}
         (contents / "Info.plist").write_bytes(plistlib.dumps(info))
         subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(bundle)], check=True)
         # Build succeeds before replacing or stopping an earlier copy.

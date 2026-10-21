@@ -24,6 +24,13 @@ struct FlyAppsResult: Decodable {
     let error: String?
 }
 
+struct UpdateResult: Decodable {
+    let ok: Bool
+    let tag: String?
+    let available: Bool?
+    let error: String?
+}
+
 final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var item: NSStatusItem!
     private let menu = NSMenu()
@@ -42,10 +49,17 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var appsRefreshError: String?
     private var partialAppList = false
     private let appsFreshnessItem = NSMenuItem(title: "Not updated yet", action: nil, keyEquivalent: "")
+    private let updateItem = NSMenuItem(title: "Check for Updates…", action: #selector(updateClicked), keyEquivalent: "")
+    private var availableTag: String?
+    private var checkingUpdates = false
+    private var nextUpdateCheck = Date.distantPast
     private let python = Bundle.main.object(forInfoDictionaryKey: "PythonPath") as! String
     private let fly = Bundle.main.object(forInfoDictionaryKey: "FlyPath") as! String
     private let directory = Bundle.main.object(forInfoDictionaryKey: "ProfileDirectory") as! String
+    private let source = Bundle.main.object(forInfoDictionaryKey: "SourceDirectory") as? String
+    private let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     private let helpURL = URL(string: "https://github.com/v-samodelkin/fly-access#readme")!
+    private let changelogURL = URL(string: "https://github.com/v-samodelkin/fly-access/blob/main/CHANGELOG.md")!
     private func resource(_ name: String) -> String { Bundle.main.resourceURL!.appendingPathComponent(name).path }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -65,18 +79,22 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(appsItem)
         menu.addItem(.separator())
         add("Refresh", #selector(refreshAll))
+        updateItem.target = self
+        menu.addItem(updateItem)
+        add("Changelog", #selector(changelog))
         add("Help", #selector(help))
         add("Quit", #selector(quit))
         renderApps()
         item.menu = menu
         for (seconds, selector) in [(15.0, #selector(refresh)), (60.0, #selector(loadApps)),
-                                    (1.0, #selector(updateAppsFreshness))] {
+                                    (1.0, #selector(updateAppsFreshness)), (900.0, #selector(checkForUpdatesWhenDue))] {
             let timer = Timer(timeInterval: seconds, target: self, selector: selector,
                               userInfo: nil, repeats: true)
             RunLoop.main.add(timer, forMode: .common)
             timers.append(timer)
         }
         refreshAll()
+        checkForUpdatesWhenDue()
     }
 
     @discardableResult private func add(_ title: String, _ action: Selector) -> NSMenuItem {
@@ -90,6 +108,88 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateAppsFreshness()
         if openedMenu === menu { refresh() }
         if Date().timeIntervalSince(lastAppsAttempt) >= 60 { loadApps() }
+        checkForUpdatesWhenDue()
+    }
+
+    // Asks GitHub for the latest release twice a day; a failed check retries after an hour.
+    @objc private func checkForUpdatesWhenDue() {
+        if Date() >= nextUpdateCheck { checkForUpdates(manual: false) }
+    }
+
+    private func checkForUpdates(manual: Bool) {
+        guard !checkingUpdates else { return }
+        checkingUpdates = true
+        if manual {
+            updateItem.title = "Checking for Updates…"
+            updateItem.isEnabled = false
+        }
+        DispatchQueue.global(qos: .utility).async {
+            let result = self.run(self.python, ["-B", self.resource("update.py"), "check", "--current", self.version])
+            let payload = try? JSONDecoder().decode(UpdateResult.self, from: result.1)
+            DispatchQueue.main.async {
+                self.checkingUpdates = false
+                self.updateItem.isEnabled = true
+                let checked = payload?.ok == true
+                self.nextUpdateCheck = Date().addingTimeInterval(checked ? 43200 : 3600)
+                if checked { self.availableTag = payload?.available == true ? payload?.tag : nil }
+                self.updateItem.title = self.availableTag.map { "Update to \($0.dropFirst())…" } ?? "Check for Updates…"
+                guard manual else { return }
+                if let tag = self.availableTag {
+                    self.offerUpdate(tag)
+                } else if checked {
+                    self.inform("Fly Access \(self.version) is up to date", "")
+                } else {
+                    self.inform("Unable to check for updates", (payload?.error ?? "Check your internet connection") + ".")
+                }
+            }
+        }
+    }
+
+    @objc private func updateClicked() {
+        if let tag = availableTag { offerUpdate(tag) } else { checkForUpdates(manual: true) }
+    }
+
+    private func offerUpdate(_ tag: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Fly Access \(tag.dropFirst()) is available"
+        alert.informativeText = "You have \(version). The update runs in Terminal: it fast-forwards your fly-access checkout to \(tag), rebuilds the menu, and asks for your password only if the tunnel changed."
+        alert.addButton(withTitle: "Update")
+        alert.addButton(withTitle: "View Changelog")
+        alert.addButton(withTitle: "Later")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: startUpdate(tag)
+        case .alertSecondButtonReturn: changelog()
+        default: break
+        }
+    }
+
+    // Terminal runs the update outside this app, so rebuilding and restarting the menu cannot cut it short.
+    private func startUpdate(_ tag: String) {
+        guard let source = source, FileManager.default.fileExists(atPath: source + "/update.py") else {
+            inform("Unable to find your fly-access checkout",
+                   "Run git pull --ff-only and python3 install-menu.py in the checkout. See Help.")
+            return
+        }
+        let script = "#!/bin/sh\ncd \(shellQuote(source)) || exit 1\nexec \(shellQuote(python)) -B update.py apply \(shellQuote(tag)) --directory \(shellQuote(directory))\n"
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("Fly Access Update.command")
+        do {
+            try script.write(to: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
+        } catch {
+            inform("Unable to start the update", error.localizedDescription)
+            return
+        }
+        NSWorkspace.shared.open(file)
+    }
+
+    private func inform(_ title: String, _ text: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     @objc private func refreshAll() { refresh(); loadApps() }
@@ -248,12 +348,7 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 self.changing = false
                 if result.0 != 0 && !result.2.contains("(-128)") {
-                    NSApp.activate(ignoringOtherApps: true)
-                    let alert = NSAlert()
-                    alert.messageText = "Connection failed"
-                    alert.informativeText = "See Help for setup and troubleshooting."
-                    alert.addButton(withTitle: "OK")
-                    alert.runModal()
+                    self.inform("Connection failed", "See Help for setup and troubleshooting.")
                 }
                 self.refresh()
             }
@@ -262,6 +357,7 @@ final class FlyMenu: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggle() { change(nextAction) }
     @objc private func help() { NSWorkspace.shared.open(helpURL) }
+    @objc private func changelog() { NSWorkspace.shared.open(changelogURL) }
     @objc private func quit() { NSApp.terminate(nil) }
 }
 
